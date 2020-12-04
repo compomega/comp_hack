@@ -591,7 +591,7 @@ void WorldSyncManager::SyncComplete<objects::EventCounter>(
 
         for (auto e :
              objects::EventCounter::LoadEventCounterListByType(worldDB, t)) {
-          if (e->GetCharacter().IsNull()) {
+          if (e->GetCharacter().IsNull() && e->GetGroupCounter()) {
             if (!gCounter) {
               // Group master found
               gCounter = e;

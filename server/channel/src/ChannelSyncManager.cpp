@@ -414,7 +414,7 @@ int8_t ChannelSyncManager::Update<objects::EventCounter>(
   (void)source;
 
   auto eCounter = std::dynamic_pointer_cast<objects::EventCounter>(obj);
-  if (!eCounter->GetCharacter().IsNull()) {
+  if (!eCounter->GetCharacter().IsNull() && !eCounter->GetGroupCounter()) {
     auto character = std::dynamic_pointer_cast<objects::Character>(
         libcomp::PersistentObject::GetObjectByUUID(eCounter->GetCharacter()));
     auto account = character ? std::dynamic_pointer_cast<objects::Account>(
@@ -439,7 +439,7 @@ int8_t ChannelSyncManager::Update<objects::EventCounter>(
         }
       }
     }
-  } else {
+  } else if (eCounter->GetGroupCounter()) {
     // Update world counters
     if (eCounter->GetPreExpireType()) {
       mEventCounters.erase(eCounter->GetPreExpireType());
