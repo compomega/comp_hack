@@ -27,6 +27,9 @@
 #ifndef SERVER_CHANNEL_SRC_ZONE_H
 #define SERVER_CHANNEL_SRC_ZONE_H
 
+// libcomp Includes
+#include <ScriptEngine.h>
+
 // channel Includes
 #include "ActiveEntityState.h"
 #include "AllyState.h"
@@ -592,13 +595,16 @@ class Zone : public objects::ZoneObject {
   /**
    * Enable or disable the supplied spawn group and also disable (or enable)
    * any affected spawn location groups
-   * @param spawnGroupID Spawn group ID to adjust
+   * @param spawnGroupIDArray Array of strings from Squirrel scripting
+   * containing the SpawnGroup IDs to adjust
    * @param enable true if the group should be enabled, false if it should
    *  be disabled
+   * @param clock World clock set to the current time
    * @return true if any updates were performed that the zone manager needs
    *  to react to, false if none occurred or they can be processed later
    */
-  bool EnableDisableSpawnGroup(uint32_t spawnGroupID, bool enable);
+  bool EnableDisableSpawnGroup(Sqrat::Array spawnGroupIDArray, bool enable,
+                               const WorldClock& clock);
 
   /**
    * Get the set of spawn location groups that need to be respawned.
@@ -788,6 +794,14 @@ class Zone : public objects::ZoneObject {
       const WorldClock& clock,
       const std::shared_ptr<objects::SpawnRestriction>& restriction);
 
+  /**
+   * Get the number of entities for which the given entity is responsible for.
+   * @param responsibleEntity Responsible entity that manages one or more other
+   * entities.
+   * @returns Number of entities for which the given entity is responsible for.
+   */
+  int32_t GetEntitiesManagedBy(const libobjgen::UUID& responsibleEntity);
+
  private:
   /**
    * Register an entity as one that currently exists in the zone
@@ -940,6 +954,10 @@ class Zone : public objects::ZoneObject {
   /// General use flags and associated values used for event sequences etc
   /// keyed on 0 for all characters or world CID if for a specific one
   std::unordered_map<int32_t, std::unordered_map<int32_t, int32_t>> mFlagStates;
+
+  /// Map of entity UUIDs that are responsible for creating some number of other
+  /// entities.
+  std::unordered_map<libobjgen::UUID, int32_t> mResponsibleEntities;
 
   /// Geometry information bound to the zone
   std::shared_ptr<ZoneGeometry> mGeometry;

@@ -843,11 +843,97 @@ void Zone::RegisterEntityState(
     const std::shared_ptr<objects::EntityStateObject>& state) {
   std::lock_guard<std::mutex> lock(mLock);
   mAllEntities[state->GetEntityID()] = state;
+
+  auto entity = std::dynamic_pointer_cast<ActiveEntityState>(state);
+  auto uuid = entity ? entity->GetResponsibleEntity() : libobjgen::UUID();
+
+  if (!uuid.IsNull()) {
+    auto rent = mResponsibleEntities.find(uuid);
+
+    int32_t count = 1;
+
+    if (rent != mResponsibleEntities.end()) {
+      count += rent->second;
+    }
+
+    mResponsibleEntities[uuid] = count;
+
+    LogZoneManagerDebug([&]() {
+      return libcomp::String(
+                 "Registering entity %1 that was created by responsible "
+                 "entity %2 who is now responsible for %3 entities.\n")
+          .Arg(state->GetEntityID())
+          .Arg(uuid.ToString())
+          .Arg(count);
+    });
+
+    int32_t total = GetManagedEntities() + 1;
+    SetManagedEntities(total);
+
+    LogZoneManagerDebug([&]() {
+      return libcomp::String(
+                 "Zone %1 now has %2 managed entities (have another entity "
+                 "responsible for them).\n")
+          .Arg(GetDefinitionID())
+          .Arg(total);
+    });
+  }
 }
 
 void Zone::UnregisterEntityState(int32_t entityID) {
   std::lock_guard<std::mutex> lock(mLock);
-  mAllEntities.erase(entityID);
+  auto it = mAllEntities.find(entityID);
+
+  if (it != mAllEntities.end()) {
+    auto entity = std::dynamic_pointer_cast<ActiveEntityState>(it->second);
+    auto uuid = entity ? entity->GetResponsibleEntity() : libobjgen::UUID();
+
+    if (!uuid.IsNull()) {
+      auto rent = mResponsibleEntities.find(uuid);
+
+      if (rent != mResponsibleEntities.end()) {
+        int32_t count = rent->second - 1;
+
+        if (0 >= rent->second) {
+          mResponsibleEntities.erase(rent);
+        } else {
+          mResponsibleEntities[uuid] = count;
+        }
+
+        LogZoneManagerDebug([&]() {
+          return libcomp::String(
+                     "Unregistering entity %1 that was created by responsible "
+                     "entity %2 who is now responsible for %3 entities.\n")
+              .Arg(entityID)
+              .Arg(uuid.ToString())
+              .Arg(count);
+        });
+
+        int32_t total = GetManagedEntities();
+        total = 0 >= total ? 0 : (total - 1);
+        SetManagedEntities(total);
+
+        LogZoneManagerDebug([&]() {
+          return libcomp::String(
+                     "Zone %1 now has %2 managed entities (have another entity "
+                     "responsible for them).\n")
+              .Arg(GetDefinitionID())
+              .Arg(total);
+        });
+      } else {
+        LogZoneManagerError([&]() {
+          return libcomp::String(
+                     "Entity %1 was responsible for entity %2 but not found in "
+                     "the responsible entity list.\n")
+              .Arg(uuid.ToString())
+              .Arg(entityID);
+        });
+      }
+    }
+
+    mAllEntities.erase(it);
+  }
+
   mPendingDespawnEntities.erase(entityID);
 }
 
@@ -1104,8 +1190,33 @@ bool Zone::UpdateTimedSpawns(const WorldClock& clock, bool initializing) {
   return updated;
 }
 
-bool Zone::EnableDisableSpawnGroup(uint32_t spawnGroupID, bool enable) {
-  std::set<uint32_t> spawnGroupIDs = {spawnGroupID};
+bool Zone::EnableDisableSpawnGroup(Sqrat::Array spawnGroupIDArray, bool enable,
+                                   const WorldClock& clock) {
+  std::set<uint32_t> spawnGroupIDs;
+
+  for (auto i = 0; i < (int)spawnGroupIDArray.GetSize(); ++i) {
+    bool ok = false;
+    auto sgIDString = spawnGroupIDArray.GetValue<libcomp::String>(i);
+    uint32_t sgID = sgIDString ? sgIDString->ToInteger<uint32_t>(&ok) : 0;
+
+    if (!ok) {
+      continue;
+    }
+
+    if (enable) {
+      auto sg = GetDefinition()->GetSpawnGroups(sgID);
+      auto restriction = sg ? sg->GetRestrictions() : nullptr;
+
+      if (restriction && TimeRestrictionActive(clock, restriction)) {
+        spawnGroupIDs.insert(sgID);
+      } else {
+        // Allow these spawngroups to be respawned based on time later
+        mDeactivatedSpawnGroups.erase(sgID);
+      }
+    } else {
+      spawnGroupIDs.insert(sgID);
+    }
+  }
 
   std::lock_guard<std::mutex> lock(mLock);
   if (enable) {
@@ -1658,6 +1769,16 @@ bool Zone::DisableSpawnGroups(const std::set<uint32_t>& spawnGroupIDs,
 
   std::set<uint32_t> disabled;
   for (uint32_t sgID : spawnGroupIDs) {
+    if (deactivate &&
+        mDeactivatedSpawnGroups.find(sgID) == mDeactivatedSpawnGroups.end()) {
+      mDeactivatedSpawnGroups.insert(sgID);
+      LogZoneManagerDebug([&]() {
+        return libcomp::String("Deactivating spawn group %1 in zone %2\n")
+            .Arg(sgID)
+            .Arg(GetDefinitionID());
+      });
+    }
+
     if (mDisabledSpawnGroups.find(sgID) == mDisabledSpawnGroups.end()) {
       auto gIter = mSpawnGroups.find(sgID);
       if (gIter != mSpawnGroups.end()) {
@@ -1678,10 +1799,6 @@ bool Zone::DisableSpawnGroups(const std::set<uint32_t>& spawnGroupIDs,
 
       mDisabledSpawnGroups.insert(sgID);
       disabled.insert(sgID);
-
-      if (deactivate) {
-        mDeactivatedSpawnGroups.insert(sgID);
-      }
     }
   }
 
@@ -1729,4 +1846,18 @@ bool Zone::DisableSpawnGroups(const std::set<uint32_t>& spawnGroupIDs,
   }
 
   return updated;
+}
+
+int32_t Zone::GetEntitiesManagedBy(const libobjgen::UUID& responsibleEntity) {
+  std::lock_guard<std::mutex> lock(mLock);
+
+  if (!responsibleEntity.IsNull()) {
+    auto rent = mResponsibleEntities.find(responsibleEntity);
+
+    if (rent != mResponsibleEntities.end()) {
+      return rent->second;
+    }
+  }
+
+  return 0;
 }
